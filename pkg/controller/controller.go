@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"strconv"
@@ -23,6 +24,14 @@ type ConfigMapController struct {
 	configmapInformer cache.SharedIndexInformer
 	kclient           *kubernetes.Clientset
 	g                 *grafana.DashboardsClient
+}
+
+type DashboardConfigMap struct {
+	Dashboard *Dashboard `json:"dashboard"`
+}
+
+type Dashboard struct {
+	Uid string `json:"uid"`
 }
 
 // Run starts the process for listening for configmap changes and acting upon those changes.
@@ -60,7 +69,9 @@ func NewConfigMapController(kclient *kubernetes.Clientset, g *grafana.Dashboards
 	)
 
 	configmapInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: configmapWatcher.createDashboards,
+		AddFunc:    configmapWatcher.createDashboards,
+		UpdateFunc: configmapWatcher.updateDashboards,
+		DeleteFunc: configmapWatcher.deleteDashboards,
 	})
 
 	configmapWatcher.kclient = kclient
@@ -71,17 +82,41 @@ func NewConfigMapController(kclient *kubernetes.Clientset, g *grafana.Dashboards
 }
 
 func (c *ConfigMapController) createDashboards(obj interface{}) {
+	c.syncDashboards(obj, "create", func(uid string, json string) error { return c.g.Create(strings.NewReader(json)) })
+}
+
+func (c *ConfigMapController) updateDashboards(oldObj, newObj interface{}) {
+	// PENDING: Could check uid is the same
+	c.syncDashboards(newObj, "update", func(uid string, json string) error { return c.g.Create(strings.NewReader(json)) })
+}
+
+func (c *ConfigMapController) deleteDashboards(obj interface{}) {
+	c.syncDashboards(obj, "delete", func(uid string, json string) error { return c.g.Delete(uid) })
+}
+
+func (c *ConfigMapController) syncDashboards(obj interface{}, method string, action func(string, string) error) {
 	configmapObj := obj.(*v1.ConfigMap)
 	isGrafanaDashboards, _ := configmapObj.Annotations["grafana.net/dashboards"]
 
 	if b, err := strconv.ParseBool(isGrafanaDashboards); err == nil && b == true {
 		for k, v := range configmapObj.Data {
-			err := c.g.Create(strings.NewReader(v))
+			var dashboardConfigMap DashboardConfigMap
+			err = json.Unmarshal([]byte(v), &dashboardConfigMap)
 			if err != nil {
-				log.Println(fmt.Sprintf("Failed to create dashboards; %s", err.Error()))
-			} else {
-				log.Println(fmt.Sprintf("Created dashboards: %s", k))
+				log.Println(fmt.Sprintf("Failed to unmarshal dashboard config; %s", err.Error()))
+				continue
 			}
+			uid := dashboardConfigMap.Dashboard.Uid
+			if uid == "" {
+				log.Println(fmt.Sprintf("Ignoring dashbard %s with no uid", k))
+				continue
+			}
+			err = action(uid, v)
+			if err != nil {
+				log.Println(fmt.Sprintf("Failed to %s dashboard; %s", method, err.Error()))
+				continue
+			}
+			log.Println(fmt.Sprintf("Successfully %sd dashboard: %s", method, k))
 		}
 	} else {
 		log.Println(fmt.Sprintf("Skipping configmap: %s", configmapObj.Name))

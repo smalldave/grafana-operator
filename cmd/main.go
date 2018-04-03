@@ -62,7 +62,10 @@ func main() {
 		panic(err.Error())
 	}
 
-	controller.NewConfigMapController(clientset, g).Run(stop, wg)
+	go func() {
+		controller.NewConfigMapController(clientset, g).Run(stop, wg)
+		log.Printf("Controller run complete")
+	}()
 
 	<-sigs // Wait for signals (this hangs until a signal arrives)
 	log.Printf("Shutting down...")
